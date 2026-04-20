@@ -69,4 +69,17 @@ volScalarField rhoT = thermo.rho();
 
 rho = rhoT;
 
+        // Perform vapour–liquid equilibrium correction on the updated
+        // thermodynamic fields.  This routine computes the vapour
+        // fraction alpha and updates the mixture density via the lever
+        // rule using the simplified VLE model.  The specific internal
+        // energy is retrieved from the thermodynamic package but is not
+        // used internally by the simpleVLE implementation; it is passed
+        // for interface compatibility.  See simpleVLE.C for details.
+        {
+            tmp<volScalarField> tE = thermo.e();
+            // Pass the vapour fraction field alphaVap to the VLE solver
+            vleSolver.correct(tE(), alphaVap);
+        }
+
 

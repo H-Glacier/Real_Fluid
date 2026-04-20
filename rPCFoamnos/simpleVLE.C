@@ -9,28 +9,24 @@
 // Implementation of the simpleVLE class.  See simpleVLE.H for details.
 
 #include "simpleVLE.H"
-#include "thermophysicalProperties.H"
+// No additional OpenFOAM headers are required beyond those in the header
 
 namespace Foam
 {
 
-// Private helper: determine if state is in two‑phase region
-bool simpleVLE::inTwoPhaseRegion(scalar T, scalar p) const
+// Private helper: determine if state is in the two‑phase region.  A cell
+// is considered to be within the two‑phase dome if its temperature is
+// below the mixture critical temperature and its pressure lies within
+// ±5% of the mixture critical pressure.  This simple criterion avoids
+// reliance on saturation functions unavailable in this context.
+bool simpleVLE::inTwoPhaseRegion(scalar T, scalar p, scalar TcMix, scalar PcMix) const
 {
-    // Use a crude criterion: compare the local pressure to the saturation
-    // pressure at the same temperature.  If the pressure is within
-    // ±5% of the saturation pressure and below the critical temperature
-    // then treat the cell as in the two‑phase region.  This heuristic is
-    // commonly used when detailed spinodal detection is not available【995506714682466†L150-L170】.
-    scalar pSat = thermo_.pSat(T);
-    scalar Tc   = thermo_.Tc();
-
-    if (T >= Tc)
+    if (T >= TcMix)
     {
         return false;
     }
 
-    if (mag(p - pSat) < 0.05 * pSat)
+    if (mag(p - PcMix) < 0.05 * PcMix)
     {
         return true;
     }
@@ -39,123 +35,111 @@ bool simpleVLE::inTwoPhaseRegion(scalar T, scalar p) const
 }
 
 // Constructor
-simpleVLE::simpleVLE(const fluidThermo& thermo, volScalarField& rho,
-                     scalar tol, label maxIter)
+simpleVLE::simpleVLE(
+    const fluidThermo& thermo,
+    volScalarField& rho,
+    const volScalarField& TcMix,
+    const volScalarField& PcMix,
+    scalar aL,
+    scalar aV,
+    scalar Zc
+)
 :
     thermo_(thermo),
     rho_(rho),
-    tol_(tol),
-    maxIter_(maxIter)
+    TcMix_(TcMix),
+    PcMix_(PcMix),
+    aL_(aL),
+    aV_(aV),
+    Zc_(Zc)
 {}
 
 // Correct the mixture to enforce equilibrium and compute alpha
 label simpleVLE::correct(const volScalarField& e, volScalarField& alpha) const
 {
-    const scalarField& T = thermo_.T();
-    const scalarField& p = thermo_.p();
+    // Retrieve temperature and pressure fields from the thermodynamic
+    // package.  The specific internal energy field 'e' is not used in
+    // the simplified implementation but retained for interface
+    // compatibility.
+    const scalarField& Tfield = thermo_.T();
+    const scalarField& pfield = thermo_.p();
 
     label nTwoPhase = 0;
 
     forAll(alpha, i)
     {
-        scalar Ti = T[i];
-        scalar pi = p[i];
-        scalar eMix = e[i];
-        scalar rhoMix = rho_[i];
+        const scalar Ti    = Tfield[i];
+        const scalar pi    = pfield[i];
+        const scalar rhoMix = rho_[i];
+        const scalar TcMi  = TcMix_[i];
+        const scalar PcMi  = PcMix_[i];
 
-        // Determine whether the state is within the two‑phase dome
-        if (!inTwoPhaseRegion(Ti, pi))
+        // Determine whether the state is within the two‑phase dome using
+        // mixture critical values.  If not, assign alpha based on whether
+        // the pressure is below or above the critical pressure and
+        // preserve the existing density.
+        if (!inTwoPhaseRegion(Ti, pi, TcMi, PcMi))
         {
-            // Single‑phase: set alpha based on whether pressure is above or below
-            // saturation line.  If p < pSat, the mixture is vapour; else liquid.
-            scalar pSat = thermo_.pSat(Ti);
-            if (pi < pSat)
+            if (pi < PcMi)
             {
-                alpha[i] = 1.0; // vapour
+                // Consider this to be vapour (superheated): alpha=1
+                alpha[i] = 1.0;
             }
             else
             {
-                alpha[i] = 0.0; // liquid
+                // Consider this to be liquid (subcooled): alpha=0
+                alpha[i] = 0.0;
             }
-            // Keep the current mixture density
             continue;
         }
 
-        // Otherwise perform UV flash to find equilibrium T and alpha
+        // Inside two‑phase region.  Compute approximate saturated
+        // densities using mixture critical values.  The critical
+        // density is obtained via the definition: rho_c = Pc / (Zc*R*Tc).
+        // The gas constant R per unit mass is provided by the
+        // thermodynamic package.  A linear law of rectilinear diameters
+        // is adopted: rhoL = rho_c*(1 + aL*(1 - T/Tc)),
+        // rhoV = rho_c*max(1 - aV*(1 - T/Tc), SMALL), ensuring the
+        // densities converge to rho_c at the critical temperature and
+        // diverge as temperature decreases.  This simple model does not
+        // capture all real‑fluid behaviour but avoids undefined saturation
+        // functions and provides a physically plausible lever rule.
+
         nTwoPhase++;
 
-        // Initial guess for saturation temperature is the current temperature
-        scalar Tguess = Ti;
+        const scalar Rgas  = thermo_.R();
+        // Guard against division by zero or non‑positive critical values
+        scalar TcSafe = max(TcMi, VSMALL);
+        scalar PcSafe = max(PcMi, VSMALL);
+        scalar rho_c  = PcSafe / (Zc_ * Rgas * TcSafe);
+        scalar tau    = 1.0 - Ti / TcSafe;
 
-        // Specific volume of the mixture
-        const scalar vMix = 1.0 / rhoMix;
-
-        for (label iter = 0; iter < maxIter_; ++iter)
+        // Saturated liquid density
+        scalar rhoL = rho_c * (1.0 + aL_ * tau);
+        // Saturated vapour density; ensure positivity
+        scalar rhoV = rho_c * (1.0 - aV_ * tau);
+        if (rhoV < SMALL)
         {
-            // Evaluate saturated properties at Tguess
-            scalar pSat = thermo_.pSat(Tguess);
-            scalar rhoL = thermo_.rhoL(Tguess);
-            scalar rhoV = thermo_.rhoV(Tguess);
-            scalar eL   = thermo_.eL(Tguess);
-            scalar eV   = thermo_.eV(Tguess);
-
-            // Compute vapour mass fraction from lever rule on specific volume
-            scalar alphaGuess = (vMix - 1.0/rhoL) / ((1.0/rhoV) - (1.0/rhoL));
-            alphaGuess = max(min(alphaGuess, 1.0), 0.0);
-
-            // Predicted internal energy
-            scalar ePred = (1.0 - alphaGuess)*eL + alphaGuess*eV;
-
-            // Residual: difference between predicted and actual energy
-            scalar residual = ePred - eMix;
-
-            if (mag(residual) < tol_)
-            {
-                // Converged
-                break;
-            }
-
-            // Finite difference to approximate derivative d(ePred)/dT
-            scalar dT = 1.0; // one Kelvin increment
-            scalar Tfd = Tguess + dT;
-
-            scalar rhoLfd = thermo_.rhoL(Tfd);
-            scalar rhoVfd = thermo_.rhoV(Tfd);
-            scalar eLfd   = thermo_.eL(Tfd);
-            scalar eVfd   = thermo_.eV(Tfd);
-            scalar alphaFd = (vMix - 1.0/rhoLfd) / ((1.0/rhoVfd) - (1.0/rhoLfd));
-            alphaFd = max(min(alphaFd, 1.0), 0.0);
-            scalar ePredFd = (1.0 - alphaFd)*eLfd + alphaFd*eVfd;
-            scalar dE_dT = (ePredFd - ePred) / dT;
-
-            // Prevent division by zero
-            if (mag(dE_dT) < SMALL)
-            {
-                break;
-            }
-
-            // Newton update on Tguess
-            Tguess -= residual / dE_dT;
-
-            // Clamp the temperature to a reasonable range to avoid divergence
-            scalar Tc = thermo_.Tc();
-            scalar Tmin = thermo_.TMin();
-            scalar Tmax = Tc;
-            Tguess = min(max(Tguess, Tmin), Tmax);
+            rhoV = SMALL;
         }
 
-        // Evaluate final saturated properties
-        scalar rhoL = thermo_.rhoL(Tguess);
-        scalar rhoV = thermo_.rhoV(Tguess);
-        scalar alphaFinal = (vMix - 1.0/rhoL) / ((1.0/rhoV) - (1.0/rhoL));
-        alphaFinal = max(min(alphaFinal, 1.0), 0.0);
+        // Specific volume of the mixture
+        const scalar vMix = 1.0 / max(rhoMix, SMALL);
 
-        // Update mixture density using the lever rule
-        scalar rhoNew = 1.0 / ((1.0 - alphaFinal)/rhoL + alphaFinal/rhoV);
+        // Vapour fraction from the lever rule on specific volume
+        scalar alphaCell = (vMix - 1.0/rhoL) / ((1.0/rhoV) - (1.0/rhoL));
+        // Clamp to [0,1]
+        alphaCell = max(min(alphaCell, 1.0), 0.0);
 
-        // Store results
-        alpha[i] = alphaFinal;
-        rho_[i] = rhoNew;
+        // Update mixture density using the lever rule.  This ensures
+        // consistency between the computed alpha and rho.  Because the
+        // saturated densities are computed from the critical values rather
+        // than iterative flash, a single update is used rather than
+        // iterating to convergence.
+        scalar rhoNew = 1.0 / ((1.0 - alphaCell)/rhoL + alphaCell/rhoV);
+
+        alpha[i] = alphaCell;
+        rho_[i]  = rhoNew;
     }
 
     return nTwoPhase;

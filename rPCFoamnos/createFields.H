@@ -183,3 +183,33 @@ Switch updateEnergyInPISO (false);
 word fluxScheme (word::null);
 Switch noFluxWeighting(false);
 
+// -------------------------------------------------------------------------
+// Create vapour fraction field and instantiate the VLE solver.
+// The alpha field represents the vapour mass fraction (between 0 and 1)
+// and is initialised to zero.  The simpleVLE solver will update this
+// field and the mixture density during the simulation.  The solver
+// requires access to the thermodynamic package, the mixture density
+// field and the mixture critical temperature/pressure fields, which
+// have been created above.  Default coefficient values are used for
+// the saturated density approximation.
+
+Info<< "Creating vapour fraction field alphaVap and VLE solver" << endl;
+
+volScalarField alphaVap
+(
+    IOobject
+    (
+        "alphaVap",
+        runTime.timeName(),
+        mesh,
+        IOobject::READ_IF_PRESENT,
+        IOobject::AUTO_WRITE
+    ),
+    mesh,
+    dimensionedScalar("alphaVap", dimless, 0.0)
+);
+
+// Construct the VLE solver with references to the thermodynamic package,
+// density field and the mixture critical property fields.
+simpleVLE vleSolver(thermo, rho, TcMix, PcMix);
+

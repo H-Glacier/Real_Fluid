@@ -51,6 +51,11 @@ Description
 #include "correctCentralACMIInterpolation.H"
 #include "centralMULES.H"
 
+// Include the simple VLE solver definition.  This header declares
+// the simpleVLE class used for single‑component vapour–liquid
+// equilibrium calculations and the associated alpha field.
+#include "simpleVLE.H"
+
 // * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * //
 
 int main(int argc, char *argv[])
